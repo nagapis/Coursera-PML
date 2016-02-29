@@ -1,0 +1,190 @@
+---
+title: "Practical Machine Learning Project"
+author: "Neil"
+date: "29 February 2016"
+output: html_document
+---
+
+#Project Report - Practical Machine Learning Course  
+
+###Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+###Data
+
+The training data for this project are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+###Reproducibility
+
+In this section, I shall load dependent R packages as well as set the seed for the pseudo random number generator.
+
+```{r}
+set.seed(3013)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer)
+library(rattle)
+library(randomForest)
+library(plyr)
+```
+
+###Downloading and importing the data
+
+```{r}
+trainUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+training <- read.csv(url(trainUrl), na.strings=c("NA","#DIV/0!",""))
+testing <- read.csv(url(testUrl), na.strings=c("NA","#DIV/0!",""))
+````
+
+###Partitioning the data  
+I shall partition the data into a 60-40 split:
+
+```{r}
+inTrain <- createDataPartition(training$classe, p=0.6, list=FALSE)
+myTraining <- training[inTrain, ]
+myTesting <- training[-inTrain, ]
+dim(myTraining); dim(myTesting)
+```
+
+###Preprocessing the data  
+I shall use the NearZeroVar fucntion to remove variables with extremely small variance which therefore won't have much fo a predictive ability in the models:
+
+```{r}
+nzv <- nearZeroVar(myTraining, saveMetrics=TRUE)
+myTraining <- myTraining[,nzv$nzv==FALSE]
+
+nzv<- nearZeroVar(myTesting,saveMetrics=TRUE)
+myTesting <- myTesting[,nzv$nzv==FALSE]
+```
+
+I shall also remove variables that mostly contain missing or NA values:
+
+```{r}
+trainingV3 <- myTraining
+for(i in 1:length(myTraining)) {
+    if( sum( is.na( myTraining[, i] ) ) /nrow(myTraining) >= .7) {
+        for(j in 1:length(trainingV3)) {
+            if( length( grep(names(myTraining[i]), names(trainingV3)[j]) ) == 1)  {
+                trainingV3 <- trainingV3[ , -j]
+            }   
+        } 
+    }
+}
+```
+
+I shall now change the new variable name and overwrite the original variable:
+```{r}
+myTraining <- trainingV3
+rm(trainingV3)
+```
+
+Finally, I shall remove any unneeded columns in the data and ensure that the columns are identical between the myTesting and testing data sets
+
+```{r}
+myTraining <- myTraining[c(-1)]
+clean1 <- colnames(myTraining)
+clean2 <- colnames(myTraining[, -58])  # remove the classe column
+myTesting <- myTesting[clean1]         # allow only variables in myTesting that are also in myTraining
+testing <- testing[clean2]             # allow only variables in testing that are also in myTraining
+
+dim(myTesting); dim(testing)
+```
+
+I also need to coerce the data into the same type between datasets:
+
+```{r}
+for (i in 1:length(testing) ) {
+    for(j in 1:length(myTraining)) {
+        if( length( grep(names(myTraining[i]), names(testing)[j]) ) == 1)  {
+            class(testing[j]) <- class(myTraining[i])
+        }      
+    }      
+}
+
+# To get the same class between testing and myTraining
+testing <- rbind(myTraining[2, -58] , testing)
+testing <- testing[-1,]
+```
+
+##Model 1: Decision Trees
+  
+Despite not being an overly complex model, I am starting my analysis by prediction via decision trees as these are a good, generic tool that's easy to interpret despite not being the most accurate and shall also make for a good benchmark against other algorithms that I shall use.
+
+```{r}
+Tree.mod <- rpart(classe ~ ., data=myTraining, method="class")
+fancyRpartPlot(Tree.mod)
+```
+
+As discussed, the interpretation of the above is pretty simple.  Let us now examine the confusion matrix to determine the accuracy of this model on the the "myTesting" data (partitioned from the training set).  This is used as a form of cross-validation.
+
+```{r}
+Tree.mod.pred <- predict(Tree.mod, myTesting, type = "class")
+Tree.CM <- confusionMatrix(Tree.mod.pred, myTesting$classe)
+Tree.CM
+```
+
+From the above output, the Decision Tree model yields an accuracy of **86.66%**  
+  
+
+##Model 2: Random Forests
+
+The use of random forests should yield an improvment in accuracy from the above decision tree model.  Unfortunately, the shortcoming of this model is that some interpretability is lost and processing time increases somewhat.
+
+```{r}
+RF.mod <- randomForest(classe ~. , data=myTraining)
+```
+
+Again, we examine the confusion matrix to determine the accuracy of this model on the the "myTesting" data (partitioned from the training set).  This is used as a form of cross-validation.
+
+```{r}
+RF.mod.pred <- predict(RF.mod, myTesting, type = "class")
+confusionMatrix(RF.mod.pred, myTesting$classe)
+```
+
+From the above output, the Decision Tree model yields an accuracy of **99.9%**  
+  
+  
+##Model 3: Generalised Boosted Regression  
+
+Despite achieving such a high accuracy in the previous model, we shall try one final method for the sake of completeness.  Boosted regression is even more difficult to interpret, but should also improve on the accuracy of the decision tree model.  The big consequence of this model is there is a large increase in processing time.
+
+```{r}
+fitControl <- trainControl(method = "repeatedcv", number = 5, repeats = 1)
+
+GBM.mod <- train(classe ~ ., data=myTraining, method = "gbm", trControl = fitControl, verbose = FALSE)
+
+
+GBM.mod.fin <- GBM.mod$finalModel
+```
+  
+Again, we examine the confusion matrix to determine the accuracy of this model on the the "myTesting" data (partitioned from the training set).  This is used as a form of cross-validation.  
+
+```{r}
+GBM.mod.pred <- predict(GBM.mod, newdata=myTesting)
+confusionMatrix(GBM.mod.pred, myTesting$classe)
+```
+  
+From the above output, the Decision Tree model yields an accuracy of **99.59%**  
+  
+  
+##Results
+
+From the confusion matrix outputs above, the **random forest** model has the greatest accuracy with 99.9% accuracy in the partitioned test data.  Therefore, the out of sample error rate is: **0.11%**  
+  
+We can also obtain predictions using this model on the test data:
+
+```{r}
+RF.mod.pred.test <- predict(RF.mod, testing, type = "class")
+RF.mod.pred.test
+```
+
